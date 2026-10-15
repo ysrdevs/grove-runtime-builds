@@ -70,13 +70,26 @@ jobs:
           "$workspace/swift/debug/grove-php-release" build --version "$PHP_VERSION" --workspace "$workspace/native" --output "$workspace/payload"
           python3 script/php-release/package.py package --version "$PHP_VERSION" --architecture "$arch" --input "$workspace/payload" --output "$PWD/release-output"
           python3 -m unittest discover -s script/php-release -p 'test_*.py'
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - name: Upload verified runtime
+        id: artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: php-${{ matrix.version }}-${{ matrix.runner }}
           path: release-output/
           if-no-files-found: error
           compression-level: 0
           retention-days: 30
+      - name: Retry transient artifact upload
+        if: steps.artifact.outcome == 'failure'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: php-${{ matrix.version }}-${{ matrix.runner }}
+          path: release-output/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+          overwrite: true
       - name: Retain build diagnostics
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
