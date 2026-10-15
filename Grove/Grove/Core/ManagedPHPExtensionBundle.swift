@@ -239,8 +239,17 @@ enum ManagedPHPExtensionBundle {
 
     private static func command(_ executable: String, _ arguments: [String], source: URL, environment: [String: String], logs: URL, name: String, timeout: TimeInterval) async throws {
         try Task.checkCancellation()
-        let result = try await ProcessRunner.run(executable: executable, arguments: arguments, directory: source, environment: environment, timeout: timeout, outputLimit: 4_000_000)
         let directory = try GrovePaths.ensureDirectory(logs.appendingPathComponent("logs"))
+        let result: ProcessResult
+        do {
+            // Native hosted Intel runners can take longer than local Apple
+            // Silicon even for configure. This path runs only on release hosts.
+            let budget = ManagedPHPCatalog.architecture == "x86_64" ? timeout * 3 : timeout
+            result = try await ProcessRunner.run(executable: executable, arguments: arguments, directory: source, environment: environment, timeout: budget, outputLimit: 4_000_000)
+        } catch {
+            try? PHPConfiguration.writePrivate(Data(error.localizedDescription.utf8), to: directory.appendingPathComponent(name + ".log"))
+            throw GroveError.message("PHP preparation failed during \(name): \(error.localizedDescription)")
+        }
         try PHPConfiguration.writePrivate(Data((result.stdout + "\n" + result.stderr).utf8), to: directory.appendingPathComponent(name + ".log"))
         guard result.exitCode == 0 else { throw GroveError.message("PHP preparation failed during \(name).\n" + String((result.stdout + "\n" + result.stderr).suffix(6_000))) }
     }

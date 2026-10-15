@@ -110,7 +110,7 @@ enum ManagedPHPDependencyBuilder {
             let result: ProcessResult
             do {
                 result = try await ProcessRunner.run(executable: executable, arguments: arguments, directory: working,
-                    environment: environment.merging(extra) { _, value in value }, timeout: 600, outputLimit: 1_000_000)
+                    environment: environment.merging(extra) { _, value in value }, timeout: ManagedPHPCatalog.architecture == "x86_64" ? 1_800 : 600, outputLimit: 1_000_000)
             } catch {
                 try? PHPConfiguration.writePrivate(Data("\(label): \(error.localizedDescription)\n".utf8), to: log)
                 throw error
