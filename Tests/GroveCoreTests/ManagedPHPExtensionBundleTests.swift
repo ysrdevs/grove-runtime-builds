@@ -2,6 +2,81 @@ import XCTest
 @testable import GroveCore
 
 final class ManagedPHPExtensionBundleTests: XCTestCase {
+    func testBuildProviderBannerPreservesVersionAndCredits() throws {
+        for version in ["8.2.33", "8.3.33", "8.4.26", "8.5.11"] {
+            for sapi in ["cli", "fpm-fcgi"] {
+                let banner = "PHP \(version) (\(sapi)) (built: Oct 15 2026 09:00:00) (NTS)\nCopyright (c) The PHP Group\nBuilt by Grove\nZend Engine v4.4.26, Copyright (c) Zend Technologies\n    with Zend OPcache v8.4.26, Copyright (c), by Zend Technologies\n"
+                XCTAssertNoThrow(try ManagedPHPExtensionBundle.validateBuildProviderBanner(banner, version: version, sapi: sapi))
+                for invalid in [banner.replacingOccurrences(of: "Built by Grove\n", with: ""),
+                                banner.replacingOccurrences(of: "Built by Grove", with: "Built by Another Provider"),
+                                banner.replacingOccurrences(of: "Copyright (c) The PHP Group\n", with: ""),
+                                banner.replacingOccurrences(of: "PHP \(version) (", with: "PHP \(version)-grove ("),
+                                banner + "Built by Grove\n"] {
+                    XCTAssertThrowsError(try ManagedPHPExtensionBundle.validateBuildProviderBanner(invalid, version: version, sapi: sapi))
+                }
+            }
+        }
+    }
+
+    func testLegacyProviderPatchPreservesCreditsAndFailsOnChangedSource() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("GrovePHPProviderPatch-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let cli = root.appendingPathComponent("sapi/cli/php_cli.c")
+        let fpm = root.appendingPathComponent("sapi/fpm/fpm/fpm_main.c")
+        try FileManager.default.createDirectory(at: cli.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: fpm.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let cliOriginal = #"php_printf("PHP %s (%s) (built: %s %s) (%s)\nCopyright (c) The PHP Group\n%s", PHP_VERSION, cli_sapi_module.name, __DATE__, __TIME__, "NTS", get_zend_version());"#
+        let fpmOriginal = "#if ZEND_DEBUG\n" + cliOriginal + "\n#else\n" + cliOriginal + "\n#endif\n"
+        for version in ["8.2.33", "8.3.33"] {
+            try cliOriginal.write(to: cli, atomically: true, encoding: .utf8)
+            try fpmOriginal.write(to: fpm, atomically: true, encoding: .utf8)
+            try ManagedPHPExtensionBundle.patchLegacyBuildProvider(version: version, source: root)
+            let patched = try String(contentsOf: cli, encoding: .utf8)
+            XCTAssertTrue(patched.contains(#"Copyright (c) The PHP Group\nBuilt by " PHP_BUILD_PROVIDER "\n%s"#))
+            XCTAssertTrue(patched.contains("PHP_VERSION, cli_sapi_module.name, __DATE__, __TIME__, \"NTS\", get_zend_version()"))
+            XCTAssertEqual(try String(contentsOf: fpm, encoding: .utf8).components(separatedBy: "PHP_BUILD_PROVIDER").count, 3)
+            XCTAssertThrowsError(try ManagedPHPExtensionBundle.patchLegacyBuildProvider(version: version, source: root))
+            try cliOriginal.write(to: cli, atomically: true, encoding: .utf8)
+            try "unexpected upstream source".write(to: fpm, atomically: true, encoding: .utf8)
+            XCTAssertThrowsError(try ManagedPHPExtensionBundle.patchLegacyBuildProvider(version: version, source: root))
+            XCTAssertEqual(try String(contentsOf: cli, encoding: .utf8), cliOriginal, "A failed source check must not partially patch the other SAPI.")
+        }
+        // Modern versions already use PHP_BUILD_PROVIDER through their shared
+        // upstream banner; this compatibility patch must leave them alone.
+        for version in ["8.4.26", "8.5.11"] {
+            try ManagedPHPExtensionBundle.patchLegacyBuildProvider(version: version, source: root)
+            XCTAssertEqual(try String(contentsOf: cli, encoding: .utf8), cliOriginal)
+        }
+    }
+
+    func testProviderPatchAgainstDownloadedOfficialSources() throws {
+        guard let sources = ProcessInfo.processInfo.environment["GROVE_PHP_PROVIDER_SOURCES"] else {
+            throw XCTSkip("Set GROVE_PHP_PROVIDER_SOURCES to colon-separated official PHP source directories to dry-run the compatibility patch.")
+        }
+        for path in sources.split(separator: ":") {
+            let source = URL(fileURLWithPath: String(path))
+            let version = String(source.lastPathComponent.dropFirst("php-".count))
+            let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("GrovePHPProviderSource-" + UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: temporary) }
+            for relative in ["sapi/cli/php_cli.c", "sapi/fpm/fpm/fpm_main.c"] {
+                let destination = temporary.appendingPathComponent(relative)
+                try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try FileManager.default.copyItem(at: source.appendingPathComponent(relative), to: destination)
+            }
+            try ManagedPHPExtensionBundle.patchLegacyBuildProvider(version: version, source: temporary)
+            if version.hasPrefix("8.2.") || version.hasPrefix("8.3.") {
+                for relative in ["sapi/cli/php_cli.c", "sapi/fpm/fpm/fpm_main.c"] {
+                    let patched = try String(contentsOf: temporary.appendingPathComponent(relative), encoding: .utf8)
+                    XCTAssertTrue(patched.contains(#"Built by " PHP_BUILD_PROVIDER "\n"#), version + " " + relative)
+                }
+            } else {
+                let shared = try String(contentsOf: source.appendingPathComponent("main/main.c"), encoding: .utf8)
+                XCTAssertTrue(shared.contains("PHP_BUILD_PROVIDER"), version)
+                XCTAssertTrue(shared.contains("Built by "), version)
+            }
+        }
+    }
+
     func testRejectsNetworkFeatureAndProtocolLoss() {
         let features = ["HTTP2": true, "HTTP3": true, "IDN": true, "BROTLI": true, "ZSTD": true]
         let protocols = ["https", "scp", "sftp", "ws", "wss"]

@@ -69,6 +69,7 @@ public enum ManagedPHPRelease {
         let modules = Dictionary(uniqueKeysWithValues: ["intl", "sodium", "xdebug", "spx"].map { ($0, directory.appendingPathComponent("modules/\($0).so")) })
         for executable in [php, fpm] { try ManagedPHPInstaller.validateMachO(at: executable, architecture: ManagedPHPCatalog.architecture) }
         try await ManagedPHPExtensionBundle.validate(runtime: runtime, php: php, fpm: fpm, modules: modules, environment: environment)
+        try await ManagedPHPExtensionBundle.validateBuildProvider(php: php, fpm: fpm, version: version, environment: environment)
         let result = try await ProcessRunner.run(executable: php.path, arguments: ["-n", "-d", "extension=\(modules["intl"]!.path)", "-d", "extension=\(modules["sodium"]!.path)", "-r", """
             if (bin2hex(Normalizer::normalize("e\\u{0301}")) !== "c3a9") exit(10);
             $key = sodium_crypto_secretbox_keygen(); $nonce = random_bytes(SODIUM_CRYPTO_SECRETBOX_NONCEBYTES);

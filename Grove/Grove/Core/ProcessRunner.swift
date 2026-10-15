@@ -17,9 +17,12 @@ public struct ProcessResult: Sendable {
 
 private final class ProcessCancellation: @unchecked Sendable {
     private let lock = NSLock()
+    private let event = DispatchSemaphore(value: 0)
     private var cancelled = false
-    func cancel() { lock.lock(); cancelled = true; lock.unlock() }
+    func cancel() { lock.lock(); cancelled = true; lock.unlock(); wake() }
     var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+    func wake() { event.signal() }
+    func wait(until deadline: DispatchTime) -> DispatchTimeoutResult { event.wait(timeout: deadline) }
 }
 
 private final class ProcessOutput: @unchecked Sendable {
@@ -108,6 +111,10 @@ public enum ProcessRunner {
             try await withCheckedThrowingContinuation { continuation in
                 DispatchQueue.global(qos: .userInitiated).async {
                     let process = Process()
+                    // Wake immediately on exit or cancellation; polling imposed a 25 ms floor
+                    // on every short command and kept long-lived commands waking while idle.
+                    process.terminationHandler = { _ in cancellation.wake() }
+                    defer { process.terminationHandler = nil }
                     process.executableURL = URL(fileURLWithPath: executable)
                     process.arguments = arguments
                     process.currentDirectoryURL = directory
@@ -141,10 +148,10 @@ public enum ProcessRunner {
                             try? input.fileHandleForWriting.write(contentsOf: standardInput)
                             try? input.fileHandleForWriting.close()
                         }
-                        let deadline = Date().addingTimeInterval(max(0.05, timeout))
+                        let deadline = DispatchTime.now() + max(0.05, timeout)
                         var timedOut = false
                         while process.isRunning {
-                            if cancellation.isCancelled || Date() >= deadline {
+                            if cancellation.isCancelled || DispatchTime.now() >= deadline {
                                 timedOut = !cancellation.isCancelled
                                 // Installers may own curl/compiler children. Remember kernel start times
                                 // before termination so a reused PID can never target an unrelated process.
@@ -157,7 +164,7 @@ public enum ProcessRunner {
                                 if process.isRunning { kill(process.processIdentifier, SIGKILL) }
                                 break
                             }
-                            Thread.sleep(forTimeInterval: 0.025)
+                            _ = cancellation.wait(until: deadline)
                         }
                         process.waitUntilExit()
                         stdout.fileHandleForReading.readabilityHandler = nil

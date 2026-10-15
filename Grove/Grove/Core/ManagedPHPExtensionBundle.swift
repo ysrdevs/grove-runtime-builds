@@ -30,6 +30,7 @@ enum ManagedPHPExtensionBundle {
                       progress: @escaping @Sendable (String) async -> Void) async throws -> Bundle {
         guard runtime.source == "Grove" else { throw GroveError.message("Only Grove's managed PHP can be prepared with this installer.") }
         let kit = try await PHPBuildSupport.source(for: runtime, directory: directory.appendingPathComponent("source"), root: root, progress: progress)
+        try patchLegacyBuildProvider(version: runtime.version, source: kit.directory)
         let opcacheProbe = try await ProcessRunner.run(executable: runtime.executablePath,
             arguments: ["-n", "-r", "echo extension_loaded('Zend OPcache') ? '1' : '0';"], environment: kit.environment, timeout: 15).requireSuccess()
         guard ["0", "1"].contains(opcacheProbe.stdout), opcacheProbe.stderr.isEmpty else { throw GroveError.message("The installed PHP extension inventory could not be read.") }
@@ -59,6 +60,9 @@ enum ManagedPHPExtensionBundle {
         environment["PATH"] = tools.appendingPathComponent("bin").path + ":" + PHPBuildSupport.systemPath
         environment["PKG_CONFIG"] = libraries.pkgConfig
         environment["LDFLAGS"] = "-L\(libraries.prefix.path)/lib -Wl,-export_dynamic"
+        // PHP uses this compile-time provider in phpinfo(), and since 8.4 in
+        // both native version banners. Older SAPIs receive the same display below.
+        environment["PHP_BUILD_PROVIDER"] = "Grove"
         if runtime.version.compare("8.4", options: .numeric) == .orderedAscending {
             // Older PHP configure scripts use pg_config and omit libpq's static
             // transitive libraries from their feature probes and final link.
@@ -81,8 +85,46 @@ enum ManagedPHPExtensionBundle {
         let modules: [String: URL] = ["intl": kit.directory.appendingPathComponent("modules/intl.so"), "sodium": kit.directory.appendingPathComponent("modules/sodium.so"), "xdebug": debugging.xdebug, "spx": debugging.spx]
         await progress("Checking PHP, FPM, and all four extensions…")
         try await validate(runtime: runtime, php: php, fpm: fpm, modules: modules, environment: kit.environment)
+        try await validateBuildProvider(php: php, fpm: fpm, version: runtime.version, environment: kit.environment)
         try Task.checkCancellation()
         return Bundle(php: php, fpm: fpm, modules: modules, spxAssets: debugging.assets, licenses: licenses)
+    }
+
+    static func patchLegacyBuildProvider(version: String, source: URL) throws {
+        guard version.hasPrefix("8.2.") || version.hasPrefix("8.3.") else { return }
+        // PHP 8.2/8.3 already expose PHP_BUILD_PROVIDER to phpinfo(), but their
+        // individual CLI/FPM banner functions predate the shared 8.4 implementation.
+        // Keep PHP_VERSION and all upstream credits intact. Fail closed if an
+        // upstream edit changes either expected banner, rather than patching loosely.
+        let original = #"Copyright (c) The PHP Group\n%s"#
+        let branded = #"Copyright (c) The PHP Group\nBuilt by " PHP_BUILD_PROVIDER "\n%s"#
+        let patches = try [("sapi/cli/php_cli.c", 1), ("sapi/fpm/fpm/fpm_main.c", 2)].map { path, count -> (URL, String) in
+            let file = source.appendingPathComponent(path)
+            let text = try String(contentsOf: file, encoding: .utf8)
+            guard text.components(separatedBy: original).count == count + 1,
+                  !text.contains(branded) else {
+                throw GroveError.message("PHP's \(path) version banner changed. Review the Grove build-provider patch before releasing this version.")
+            }
+            return (file, text.replacingOccurrences(of: original, with: branded))
+        }
+        for (file, text) in patches { try text.write(to: file, atomically: true, encoding: .utf8) }
+    }
+
+    static func validateBuildProvider(php: URL, fpm: URL, version: String, environment: [String: String]) async throws {
+        for (binary, sapi) in [(php, "cli"), (fpm, "fpm-fcgi")] {
+            let result = try await ProcessRunner.run(executable: binary.path, arguments: ["-n", "-v"], environment: environment, timeout: 15).requireSuccess()
+            try validateBuildProviderBanner(result.stdout, version: version, sapi: sapi)
+            guard result.stderr.isEmpty else { throw GroveError.message("The Grove PHP version banner emitted a startup warning.") }
+        }
+    }
+
+    static func validateBuildProviderBanner(_ banner: String, version: String, sapi: String) throws {
+        let lines = banner.split(separator: "\n", omittingEmptySubsequences: false)
+        guard lines.count >= 4, lines[0].hasPrefix("PHP \(version) (\(sapi)) (built: "),
+              lines[1] == "Copyright (c) The PHP Group", lines[2] == "Built by Grove",
+              lines[3].hasPrefix("Zend Engine v"), lines.filter({ $0 == "Built by Grove" }).count == 1 else {
+            throw GroveError.message("The completed PHP release is missing Grove's build provider or the upstream version credits.")
+        }
     }
 
     static func configureArguments(version: String, prefix: URL, output: URL, includeOpcache: Bool = true) -> [String] {
