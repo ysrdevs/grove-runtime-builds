@@ -33,7 +33,7 @@ enum ManagedPHPExtensionBundle {
         let opcacheProbe = try await ProcessRunner.run(executable: runtime.executablePath,
             arguments: ["-n", "-r", "echo extension_loaded('Zend OPcache') ? '1' : '0';"], environment: kit.environment, timeout: 15).requireSuccess()
         guard ["0", "1"].contains(opcacheProbe.stdout), opcacheProbe.stderr.isEmpty else { throw GroveError.message("The installed PHP extension inventory could not be read.") }
-        let includeOpcache = opcacheProbe.stdout == "1"
+        let includeOpcache = true
         let licenses = try GrovePaths.ensureDirectory(directory.appendingPathComponent("licenses"))
         try copyNotices(from: kit.directory, to: licenses.appendingPathComponent("PHP"))
         await progress("Preparing PHP's build tools…")
@@ -91,7 +91,7 @@ enum ManagedPHPExtensionBundle {
             "--enable-bcmath", "--with-bz2=\(prefix.path)", "--enable-calendar", "--enable-ctype", "--with-curl", "--with-libxml",
             "--enable-xml", "--enable-dom", "--enable-exif", "--enable-fileinfo", "--enable-filter", "--with-zlib", "--with-openssl",
             "--enable-ftp", "--enable-gd", "--with-freetype", "--with-jpeg", "--with-webp", "--with-avif", "--with-gmp=\(prefix.path)", "--with-iconv=\(prefix.path)",
-            "--enable-mbstring", "--enable-mbregex", "--enable-mysqlnd", "--enable-pcntl", "--enable-pdo", "--with-pdo-mysql", "--with-sqlite3", "--with-pdo-sqlite",
+            "--enable-mbstring", "--enable-mbregex", "--enable-mysqlnd", "--with-mysqli", "--enable-pcntl", "--enable-pdo", "--with-pdo-mysql", "--with-sqlite3", "--with-pdo-sqlite",
             "--with-pgsql", "--with-pdo-pgsql", "--enable-phar", "--enable-posix", "--enable-session",
             "--enable-apcu", "--enable-igbinary", "--with-msgpack", "--enable-redis", "--enable-redis-session", "--enable-redis-igbinary", "--enable-redis-msgpack",
             "--disable-redis-lzf", "--enable-redis-zstd", "--with-libzstd=\(prefix.path)", "--enable-redis-lz4", "--with-liblz4=\(prefix.path)",
@@ -188,7 +188,7 @@ enum ManagedPHPExtensionBundle {
         let before = try JSONDecoder().decode(Inventory.self, from: Data(original.stdout.utf8))
         let after = try JSONDecoder().decode(Inventory.self, from: Data(replacement.stdout.utf8))
         guard original.stderr.isEmpty, replacement.stderr.isEmpty, before.version == runtime.version, after.version == runtime.version,
-              Set(before.modules) == Set(after.modules) else {
+              Set(before.modules).isSubset(of: Set(after.modules)), Set(["mysqli", "Zend OPcache"]).isSubset(of: Set(after.modules)) else {
             throw GroveError.message("The prepared PHP runtime did not preserve the installed version and built-in extensions. The original runtime is unchanged.")
         }
         guard preservesCurlCapabilities(originalFeatures: before.curlFeatures, originalProtocols: before.curlProtocols,

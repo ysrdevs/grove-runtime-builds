@@ -101,7 +101,8 @@ enum OwnedCommandChildren {
 public enum ProcessRunner {
     /// Executes an argument vector directly. Output is bounded and cancellation stops the owned process.
     public static func run(executable: String, arguments: [String], directory: URL? = nil,
-                           environment: [String: String] = [:], removingEnvironment: Set<String> = [], timeout: TimeInterval = 120, outputLimit: Int = 2_000_000) async throws -> ProcessResult {
+                           environment: [String: String] = [:], removingEnvironment: Set<String> = [], timeout: TimeInterval = 120, outputLimit: Int = 2_000_000, standardInput: Data? = nil) async throws -> ProcessResult {
+        guard (standardInput?.count ?? 0) <= 8_192 else { throw GroveError.message("Command input exceeds the 8 KB limit.") }
         let cancellation = ProcessCancellation()
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
@@ -113,7 +114,16 @@ public enum ProcessRunner {
                     var inherited = GrovePaths.processEnvironment
                     for key in removingEnvironment { inherited.removeValue(forKey: key) }
                     process.environment = inherited.merging(environment) { _, new in new }
-                    process.standardInput = FileHandle.nullDevice
+                    let input = standardInput == nil ? nil : Pipe()
+                    if let input {
+                        process.standardInput = input
+                        // A child may close stdin immediately; do not deliver SIGPIPE to Grove.
+                        _ = fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
+                    } else { process.standardInput = FileHandle.nullDevice }
+                    defer {
+                        try? input?.fileHandleForReading.close()
+                        try? input?.fileHandleForWriting.close()
+                    }
                     let stdout = Pipe(), stderr = Pipe()
                     let limit = min(32_000_000, max(1_000, outputLimit))
                     let out = ProcessOutput(limit: limit), err = ProcessOutput(limit: limit)
@@ -125,6 +135,12 @@ public enum ProcessRunner {
                     do {
                         if cancellation.isCancelled { throw CancellationError() }
                         try process.run()
+                        if let input, let standardInput {
+                            try? input.fileHandleForReading.close()
+                            // This bounded payload fits in a pipe; no stdin writer thread can outlive cancellation.
+                            try? input.fileHandleForWriting.write(contentsOf: standardInput)
+                            try? input.fileHandleForWriting.close()
+                        }
                         let deadline = Date().addingTimeInterval(max(0.05, timeout))
                         var timedOut = false
                         while process.isRunning {

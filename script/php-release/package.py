@@ -17,7 +17,7 @@ import tempfile
 import urllib.request
 
 MODULES = ("intl", "sodium", "xdebug", "spx")
-RECIPE = 3
+RECIPE = 4
 MAX_EXPANDED = 400_000_000
 VERSION = re.compile(r"8\.[2-5]\.[0-9]+\Z")
 SHA = re.compile(r"[a-f0-9]{64}\Z")
