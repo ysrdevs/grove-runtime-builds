@@ -22,6 +22,13 @@ The build recipe's dependency URLs and checksums are pinned in source. PHP relea
 
 Run the **Build PHP runtimes** workflow manually with exact patch versions. Its default matrix covers PHP 8.2.33, 8.3.33, 8.4.26, and 8.5.11 on `macos-15` (Apple Silicon) and `macos-15-intel`. Build outputs are unsigned GitHub Actions artifacts. No private signing key or Cloudflare credentials belong in this repository.
 
+The `architectures` input accepts `arm64`, `x86_64`, or both separated by a comma. Retry only the failed version/architecture after a recipe repair, so successful native builds do not need to run again. For example:
+
+```sh
+gh workflow run php-runtimes.yml --repo ysrdevs/grove-runtime-builds \
+  -f versions=8.2.33,8.3.33 -f architectures=x86_64
+```
+
 The release maintainer downloads and reviews successful outputs, signs the package catalog with a separately held Ed25519 key, and publishes immutable SHA-addressed archives to Cloudflare R2 before the catalog. The desktop app pins that public key and checks the catalog, archive, every extracted file, architecture, system-only linkage, exact PHP/module versions, and CLI/FPM startup before activation. CI success alone does not publish an update.
 
 Third-party components retain their own licenses in each package. Grove's build code is MIT licensed.
