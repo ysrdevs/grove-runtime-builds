@@ -1,8 +1,10 @@
 import Foundation
+import Darwin
 import GroveCore
 
 @main struct GrovePHPReleaseCommand {
     static func main() async {
+        setbuf(stdout, nil)
         do {
             let args = Array(CommandLine.arguments.dropFirst())
             guard let command = args.first, ["build", "import-cache", "verify"].contains(command) else {
