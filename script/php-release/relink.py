@@ -22,7 +22,10 @@ def environment(root):
     prefix = root / "libraries"
     return {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "SDKROOT": sdk, "MACOSX_DEPLOYMENT_TARGET": "14.0",
             "CC": "/usr/bin/clang", "CXX": "/usr/bin/clang++", "CFLAGS": flags, "CXXFLAGS": flags,
-            "CPPFLAGS": "-I" + str(prefix / "include"), "LDFLAGS": "-L" + str(prefix / "lib"),
+            # PHP 8.2 consumes these flags from make's environment rather than
+            # retaining them in its generated Makefile. Match the engine build.
+            "CPPFLAGS": "-I" + str(prefix / "include"),
+            "LDFLAGS": "-L" + str(prefix / "lib") + " -Wl,-export_dynamic -framework CoreFoundation",
             "PKG_CONFIG": "/usr/bin/false", "PKG_CONFIG_PATH": "", "PKG_CONFIG_LIBDIR": "/var/empty",
             "CONFIG_SITE": "/dev/null", "PHPRC": "", "PHP_INI_SCAN_DIR": "", "XDEBUG_MODE": "off"}
 
