@@ -63,6 +63,10 @@ enum ManagedPHPExtensionBundle {
             // Older PHP configure scripts use pg_config and omit libpq's static
             // transitive libraries from their feature probes and final link.
             environment["LIBS"] = libraries.environment["PGSQL_LIBS"]
+            // The older link-only probe can find a private dependency's
+            // explicit_bzero without a matching SDK declaration. PHP's own
+            // implementation preserves secure zeroing with a compiler barrier.
+            environment["ac_cv_func_explicit_bzero"] = "no"
         }
         await progress("Configuring PHP \(runtime.version) and optional extensions…")
         try await command(kit.directory.appendingPathComponent("configure").path,
