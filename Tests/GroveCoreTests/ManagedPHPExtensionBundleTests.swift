@@ -128,6 +128,9 @@ final class ManagedPHPExtensionBundleTests: XCTestCase {
                        "xdebug": directory.appendingPathComponent("modules/xdebug.so"), "spx": directory.appendingPathComponent("modules/spx.so")]
         try await ManagedPHPExtensionBundle.validate(runtime: runtime, php: source.appendingPathComponent("sapi/cli/php"),
             fpm: source.appendingPathComponent("sapi/fpm/php-fpm"), modules: modules, environment: ["PATH": PHPBuildSupport.systemPath])
+        if environment["GROVE_PHP_VERIFY_PARITY"] == "1" {
+            try await ManagedPHPExtensionBundle.validateParity(php: source.appendingPathComponent("sapi/cli/php"), environment: ["PATH": PHPBuildSupport.systemPath])
+        }
     }
 
     func testBuildsActualManagedRuntimeAndGeneratesProfilesWithoutHomebrew() async throws {
@@ -140,7 +143,26 @@ final class ManagedPHPExtensionBundleTests: XCTestCase {
         let version = try await ProcessRunner.run(executable: binary, arguments: ["-n", "-r", "echo PHP_VERSION;"], timeout: 15).requireSuccess().stdout
         let runtime = RuntimeInstallation(family: .php, version: version, executablePath: binary, source: "Grove")
         // Keep the disposable tree on failure so compiler output is reviewable.
-        let bundle = try await ManagedPHPExtensionBundle.build(for: runtime, directory: build, root: build.appendingPathComponent("state")) { message in
+        var preparedLibraries: ManagedPHPDependencyBuilder.Prepared?
+        if let fixture = environment["GROVE_PHP_PREPARED_LIBRARY_FIXTURE"] {
+            guard fixture.hasPrefix("/private/tmp/GrovePHPParity") else { throw GroveError.message("Parity library fixtures must use a private test workspace.") }
+            let prefix = URL(fileURLWithPath: fixture)
+            var compiler = try await PHPBuildSupport.compilerEnvironment()
+            let pkgConfig = prefix.appendingPathComponent("bin/pkg-config").path
+            compiler["PKG_CONFIG"] = pkgConfig
+            compiler["PKG_CONFIG_LIBDIR"] = prefix.appendingPathComponent("lib/pkgconfig").path
+            compiler["CPPFLAGS"] = "-I\(prefix.path)/include"
+            compiler["LDFLAGS"] = "-L\(prefix.path)/lib"
+            let sdk = compiler["SDKROOT"]!
+            compiler["LIBXML_CFLAGS"] = "-I\(sdk)/usr/include/libxml2"; compiler["LIBXML_LIBS"] = "-lxml2"
+            compiler.merge(ManagedPHPParityDependencies.systemEnvironment(sdk: sdk)) { _, value in value }
+            for (name, flag, library) in [("CURL_CFLAGS", "--cflags", "libcurl"), ("CURL_LIBS", "--libs", "libcurl"), ("PGSQL_LIBS", "--libs", "libpq")] {
+                compiler[name] = try await ProcessRunner.run(executable: pkgConfig, arguments: [flag, library], environment: compiler, timeout: 15).requireSuccess().stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            compiler["PGSQL_CFLAGS"] = "-I\(prefix.path)/include"
+            preparedLibraries = .init(prefix: prefix, environment: compiler, pkgConfig: pkgConfig)
+        }
+        let bundle = try await ManagedPHPExtensionBundle.build(for: runtime, directory: build, root: build.appendingPathComponent("state"), preparedLibraries: preparedLibraries) { message in
             print("PHP bundle: \(message)")
         }
         let profile = try GrovePaths.ensureDirectory(build.appendingPathComponent("profiles"))

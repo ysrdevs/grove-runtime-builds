@@ -20,9 +20,12 @@ enum ManagedPHPCatalog {
     struct Package: Equatable, Sendable {
         let version: String
         let architecture: String
+        var publishedPackageID: String? = nil
         var identifier: String { "staticphp-\(version)-\(architecture)" }
         var release: RuntimeRelease {
-            .init(family: .php, version: version, label: "Grove · PHP \(version.split(separator: ".").prefix(2).joined(separator: "."))", installIdentifier: identifier)
+            var release = RuntimeRelease(family: .php, version: version, label: "Grove · PHP \(version.split(separator: ".").prefix(2).joined(separator: "."))", installIdentifier: identifier)
+            release.publishedPackageID = publishedPackageID
+            return release
         }
         func archiveName(sapi: String) -> String { "php-\(version)-\(sapi)-macos-\(architecture).tar.gz" }
         func url(sapi: String) -> URL { baseURL.appendingPathComponent(archiveName(sapi: sapi)) }

@@ -69,6 +69,7 @@ jobs:
           swift build --product grove-php-release --scratch-path "$workspace/swift"
           "$workspace/swift/debug/grove-php-release" build --version "$PHP_VERSION" --workspace "$workspace/native" --output "$workspace/payload"
           python3 script/php-release/package.py package --version "$PHP_VERSION" --architecture "$arch" --input "$workspace/payload" --output "$PWD/release-output"
+          python3 script/php-release/relink-kit.py --version "$PHP_VERSION" --architecture "$arch" --build "$workspace/native/build" --payload "$workspace/payload" --recipe "$PWD" --output "$PWD/release-output" --verify
           python3 -m unittest discover -s script/php-release -p 'test_*.py'
       - name: Upload verified runtime
         id: artifact

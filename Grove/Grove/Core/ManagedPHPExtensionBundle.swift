@@ -16,17 +16,33 @@ enum ManagedPHPExtensionBundle {
         let name: String
         let version: String
         let sha256: String
-        var url: URL { URL(string: "https://pecl.php.net/get/\(name)-\(version).tgz")! }
+        var url: URL {
+            if name == "lz4" { return URL(string: "https://codeload.github.com/kjdev/php-ext-lz4/tar.gz/refs/tags/\(version)")! }
+            if name == "imagick" { return URL(string: "https://codeload.github.com/Imagick/imagick/tar.gz/refs/tags/\(version)")! }
+            return URL(string: "https://pecl.php.net/get/\(name)-\(version).tgz")!
+        }
+        var topDirectory: String { name == "lz4" ? "php-ext-lz4-\(version)" : "\(name)-\(version)" }
     }
     private static let extensions: [Source] = [
         .init(name: "apcu", version: "5.1.28", sha256: "ca9c1820810a168786f8048a4c3f8c9e3fd941407ad1553259fb2e30b5f057bf"),
         .init(name: "redis", version: "6.3.0", sha256: "0d5141f634bd1db6c1ddcda053d25ecf2c4fc1c395430d534fd3f8d51dd7f0b5"),
         .init(name: "igbinary", version: "3.2.17RC1", sha256: "91da821443db125282a6aea039f24588dd28ff5d71e8187f6ecc41165bceafbc"),
-        .init(name: "msgpack", version: "3.0.1", sha256: "e30be355ab79aaea4568692fbd6073fd7c7f50ea8d3cf12edce40fc0c921d868")
+        .init(name: "msgpack", version: "3.0.1", sha256: "e30be355ab79aaea4568692fbd6073fd7c7f50ea8d3cf12edce40fc0c921d868"),
+        .init(name: "imagick", version: "3.8.1", sha256: "b0e9279ddf6e75a8c6b4068e16daec0475427dbca7ce2e144e30a51a88aa5ddc"),
+        .init(name: "mongodb", version: "2.5.4", sha256: "41eead0799cc66876b12d10b5efe86268bfc704c1be57a70d49e4bd4bf6c8ee1"),
+        .init(name: "zstd", version: "0.18.0", sha256: "223d0f77eb5a5e73cf5e7a0652dd8fde7ffdcc843e7f30eeb3998283dec847b9"),
+        .init(name: "lz4", version: "0.7.1", sha256: "e5913a346c65ed5d3d487398332a66629db2c863e02dfe0e949f653471853fcc")
     ]
+    private static let sqlExtensions: [Source] = [
+        .init(name: "sqlsrv", version: "5.13.3", sha256: "1c3092ca793bb67002ca022c412aacabb79a3297ee7005e3b7cc91b1e7166d22"),
+        .init(name: "pdo_sqlsrv", version: "5.13.3", sha256: "198a7b37da0658d36a93d158a0ec179b137b3a4d241c90a6650ae9ee8f91ec4a")
+    ]
+    private static let imapExtension = Source(name: "imap", version: "1.0.3", sha256: "0c2c0b1f94f299004be996b85a424e3d11ff65ac0a3c980db3213289a4a3faaf")
+    static let additionalBuiltInModules: Set<String> = ["dba", "ffi", "gettext", "imagick", "imap", "ldap", "lz4", "mongodb", "pdo_sqlsrv", "readline", "shmop", "sqlsrv", "sysvmsg", "sysvsem", "sysvshm", "xsl", "zstd"]
     private static let jobs = String(min(8, ProcessInfo.processInfo.activeProcessorCount))
 
     static func build(for runtime: RuntimeInstallation, directory: URL, root: URL,
+                      preparedLibraries: ManagedPHPDependencyBuilder.Prepared? = nil,
                       progress: @escaping @Sendable (String) async -> Void) async throws -> Bundle {
         guard runtime.source == "Grove" else { throw GroveError.message("Only Grove's managed PHP can be prepared with this installer.") }
         let kit = try await PHPBuildSupport.source(for: runtime, directory: directory.appendingPathComponent("source"), root: root, progress: progress)
@@ -39,30 +55,45 @@ enum ManagedPHPExtensionBundle {
         try copyNotices(from: kit.directory, to: licenses.appendingPathComponent("PHP"))
         await progress("Preparing PHP's build tools…")
         let tools = try await buildTools(directory: directory, root: root, environment: kit.environment)
-        for source in extensions {
+        var sources = extensions
+        if runtime.version.compare("8.4", options: .numeric) != .orderedAscending {
+            sources.append(imapExtension)
+        }
+        // 5.13 contains upstream memory-safety fixes missing from 5.12.
+        // Grove also exercises 5.13 on PHP 8.2; Microsoft officially supports 8.3+.
+        sources += sqlExtensions
+        for source in sources {
             await progress("Preparing \(source.name) \(source.version)…")
             let archive = try await PHPBuildSupport.download(url: source.url, sha256: source.sha256, maximumBytes: 8_000_000, root: root)
             let unpack = directory.appendingPathComponent("sources/\(source.name)")
             try await PHPBuildSupport.extract(archive: archive, to: unpack)
-            let sourceDirectory = unpack.appendingPathComponent("\(source.name)-\(source.version)")
+            let sourceDirectory = unpack.appendingPathComponent(source.topDirectory)
             try copyNotices(from: sourceDirectory, to: licenses.appendingPathComponent(source.name))
             try FileManager.default.copyItem(at: sourceDirectory, to: kit.directory.appendingPathComponent("ext/\(source.name)"))
         }
+        try patchParityExtensions(source: kit.directory)
         if includeOpcache {
             try await patchStaticOpcache(version: runtime.version, source: kit.directory, root: root, environment: kit.environment, logs: directory, licenses: licenses)
         }
         var environment = kit.environment
         environment["PATH"] = tools.appendingPathComponent("bin").path + ":" + PHPBuildSupport.systemPath
         try await command(kit.directory.appendingPathComponent("buildconf").path, ["--force"], source: kit.directory, environment: environment, logs: directory, name: "php-buildconf", timeout: 180)
-        let libraries = try await ManagedPHPExtensionInstaller.prepareLibraries(directory: directory.appendingPathComponent("libraries"), root: root, progress: progress)
+        let libraries: ManagedPHPDependencyBuilder.Prepared
+        if let preparedLibraries { libraries = preparedLibraries }
+        else { libraries = try await ManagedPHPExtensionInstaller.prepareLibraries(directory: directory.appendingPathComponent("libraries"), root: root, progress: progress) }
         try FileManager.default.copyItem(at: libraries.prefix.appendingPathComponent("source-licenses"), to: licenses.appendingPathComponent("libraries"))
         environment.merge(libraries.environment) { _, new in new }
         environment["PATH"] = tools.appendingPathComponent("bin").path + ":" + PHPBuildSupport.systemPath
         environment["PKG_CONFIG"] = libraries.pkgConfig
-        environment["LDFLAGS"] = "-L\(libraries.prefix.path)/lib -Wl,-export_dynamic"
+        // GNU gettext reads macOS language preferences through CoreFoundation.
+        // Keep the framework available during configure's static link probes.
+        environment["LDFLAGS"] = "-L\(libraries.prefix.path)/lib -Wl,-export_dynamic -framework CoreFoundation"
         // PHP uses this compile-time provider in phpinfo(), and since 8.4 in
         // both native version banners. Older SAPIs receive the same display below.
         environment["PHP_BUILD_PROVIDER"] = "Grove"
+        let components = runtime.version.split(separator: ".").compactMap { Int($0) }
+        environment["PHP_VERSION_ID"] = String(components[0] * 10_000 + components[1] * 100 + components[2])
+        environment["PHP_VERSION"] = runtime.version
         if runtime.version.compare("8.4", options: .numeric) == .orderedAscending {
             // Older PHP configure scripts use pg_config and omit libpq's static
             // transitive libraries from their feature probes and final link.
@@ -86,6 +117,7 @@ enum ManagedPHPExtensionBundle {
         await progress("Checking PHP, FPM, and all four extensions…")
         try await validate(runtime: runtime, php: php, fpm: fpm, modules: modules, environment: kit.environment)
         try await validateBuildProvider(php: php, fpm: fpm, version: runtime.version, environment: kit.environment)
+        try await validateParity(php: php, environment: kit.environment)
         try Task.checkCancellation()
         return Bundle(php: php, fpm: fpm, modules: modules, spxAssets: debugging.assets, licenses: licenses)
     }
@@ -127,6 +159,80 @@ enum ManagedPHPExtensionBundle {
         }
     }
 
+    static func patchParityExtensions(source: URL) throws {
+        // The upstream Git tag uses PECL's packaging placeholder. Apply its
+        // declared package-info replacement while preserving all source credits.
+        let imagickHeader = source.appendingPathComponent("ext/imagick/php_imagick.h")
+        let imagickText = try String(contentsOf: imagickHeader, encoding: .utf8)
+        guard imagickText.components(separatedBy: "@PACKAGE_VERSION@").count == 2,
+              let imagickVersion = extensions.first(where: { $0.name == "imagick" })?.version else {
+            throw GroveError.message("Review Imagick's package version declaration before releasing this source version.")
+        }
+        try imagickText.replacingOccurrences(of: "@PACKAGE_VERSION@", with: imagickVersion)
+            .write(to: imagickHeader, atomically: true, encoding: .utf8)
+        for name in ["sqlsrv", "pdo_sqlsrv"] {
+            let config = source.appendingPathComponent("ext/\(name)/config.m4")
+            let text = try String(contentsOf: config, encoding: .utf8)
+            guard text.components(separatedBy: "PHP_ADD_LIBRARY(stdc++,").count == 2 else {
+                throw GroveError.message("Review \(name)'s C++ runtime configuration before releasing this source version.")
+            }
+            try text.replacingOccurrences(of: "PHP_ADD_LIBRARY(stdc++,", with: "PHP_ADD_LIBRARY(c++,")
+                .write(to: config, atomically: true, encoding: .utf8)
+        }
+        let imapConfig = source.appendingPathComponent("ext/imap/config.m4")
+        let imapText = try String(contentsOf: imapConfig, encoding: .utf8)
+        try imapText.replacingOccurrences(of: "TST_LIBS=\"$DLIBS $IMAP_SHARED_LIBADD\"", with: "TST_LIBS=\"$DLIBS $IMAP_SHARED_LIBADD -lz\"")
+            .write(to: imapConfig, atomically: true, encoding: .utf8)
+    }
+
+    /// Exercise actual APIs, not just the module listing. No network service or
+    /// shared machine configuration is needed by these release acceptance probes.
+    static func validateParity(php: URL, environment: [String: String]) async throws {
+        let expected = additionalBuiltInModules.sorted().map { "'\($0)'" }.joined(separator: ",")
+        let versions = (extensions + sqlExtensions).filter { additionalBuiltInModules.contains($0.name) }
+            .map { "'\($0.name)' => '\($0.version)'" }.joined(separator: ",")
+        let script = #"""
+        $required = [REQUIRED];
+        $loaded = array_map('strtolower', get_loaded_extensions());
+        foreach ($required as $module) { if (!in_array($module, $loaded, true)) throw new Exception('Missing extension '.$module); }
+        foreach ([VERSIONS] as $module => $version) {
+            if (phpversion($module) !== $version) throw new Exception('Unexpected '.$module.' version: '.phpversion($module));
+        }
+        if (phpversion('imap') !== (PHP_VERSION_ID >= 80400 ? 'IMAP_VERSION' : PHP_VERSION)) throw new Exception('Unexpected IMAP version');
+        if (FFI::cdef('int abs(int);')->abs(-7) !== 7) throw new Exception('FFI call failed');
+        if (gettext('Grove') !== 'Grove') throw new Exception('gettext failed');
+        $image = new Imagick(); $image->newImage(16, 12, 'red'); $image->setImageFormat('png');
+        $copy = new Imagick(); $copy->readImageBlob($image->getImageBlob()); $copy->thumbnailImage(8, 6);
+        if ($copy->getImageWidth() !== 8 || $copy->getImageHeight() !== 6) throw new Exception('ImageMagick failed');
+        if (imap_utf8('=?UTF-8?B?R3JvdmU=?=') !== 'Grove') throw new Exception('IMAP decoding failed');
+        if (ldap_escape('a*b', '', LDAP_ESCAPE_FILTER) !== 'a\2ab') throw new Exception('LDAP escaping failed');
+        $oid = new MongoDB\BSON\ObjectId(); if (strlen((string)$oid) !== 24) throw new Exception('MongoDB BSON failed');
+        foreach (['zstd', 'lz4'] as $codec) {
+            $compress = $codec.'_compress'; $uncompress = $codec.'_uncompress';
+            if ($uncompress($compress('Grove round trip')) !== 'Grove round trip') throw new Exception($codec.' failed');
+        }
+        $xml = new DOMDocument(); $xml->loadXML('<root>Grove</root>');
+        $xsl = new DOMDocument(); $xsl->loadXML('<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="root"/></xsl:template></xsl:stylesheet>');
+        $processor = new XSLTProcessor(); $processor->importStylesheet($xsl);
+        if ($processor->transformToXml($xml) !== 'Grove') throw new Exception('XSLT failed');
+        if (!function_exists('sqlsrv_configure') || !in_array('sqlsrv', PDO::getAvailableDrivers(), true)) throw new Exception('SQL Server extension registration failed');
+        if (!function_exists('readline') || !function_exists('shmop_open') || !function_exists('msg_get_queue') || !function_exists('sem_get') || !function_exists('shm_attach')) throw new Exception('System APIs missing');
+        $path = tempnam(sys_get_temp_dir(), 'grove-dba-');
+        try {
+            $db = dba_open($path, 'n', 'flatfile');
+            if (!$db || !dba_insert('grove', 'ready', $db) || dba_fetch('grove', $db) !== 'ready') throw new Exception('DBA failed');
+            dba_close($db);
+        } finally { @unlink($path); }
+        echo 'Grove extension parity verified';
+        """#.replacingOccurrences(of: "REQUIRED", with: expected)
+            .replacingOccurrences(of: "VERSIONS", with: versions)
+            .replacingOccurrences(of: "IMAP_VERSION", with: imapExtension.version)
+        let result = try await ProcessRunner.run(executable: php.path, arguments: ["-n", "-d", "ffi.enable=true", "-r", script], environment: environment, timeout: 30).requireSuccess()
+        guard result.stdout == "Grove extension parity verified", result.stderr.isEmpty else {
+            throw GroveError.message("The additional PHP extensions did not pass their native API checks.\n" + result.stdout + result.stderr)
+        }
+    }
+
     static func configureArguments(version: String, prefix: URL, output: URL, includeOpcache: Bool = true) -> [String] {
         var arguments = ["--disable-all", "--disable-cgi", "--disable-phpdbg", "--without-pear", "--enable-cli", "--enable-fpm", "--with-pic", "--enable-rtld-now",
             "--prefix=\(output.path)", "--with-config-file-path=/var/empty", "--with-config-file-scan-dir=/var/empty",
@@ -138,7 +244,13 @@ enum ManagedPHPExtensionBundle {
             "--enable-apcu", "--enable-igbinary", "--with-msgpack", "--enable-redis", "--enable-redis-session", "--enable-redis-igbinary", "--enable-redis-msgpack",
             "--disable-redis-lzf", "--enable-redis-zstd", "--with-libzstd=\(prefix.path)", "--enable-redis-lz4", "--with-liblz4=\(prefix.path)",
             "--enable-simplexml", "--enable-soap", "--enable-sockets", "--enable-tokenizer", "--enable-xmlwriter", "--enable-xmlreader", "--with-zip",
-            "--enable-intl=shared", "--with-sodium=shared"]
+            "--enable-intl=shared", "--with-sodium=shared",
+            "--enable-dba", "--enable-inifile", "--enable-flatfile", "--with-ffi", "--with-gettext=\(prefix.path)",
+            "--with-imagick=\(prefix.path)", "--with-imap=\(prefix.path)", "--with-imap-ssl=\(prefix.path)", "--with-ldap=\(prefix.path)",
+            "--with-libedit", "--enable-shmop", "--enable-sysvmsg", "--enable-sysvsem", "--enable-sysvshm", "--with-xsl",
+            "--enable-mongodb", "--with-mongodb-system-libs=no", "--with-mongodb-client-side-encryption=no", "--with-mongodb-sasl=no",
+            "--with-mongodb-ssl=openssl", "--with-mongodb-zstd=yes", "--with-mongodb-zlib=yes",
+            "--enable-lz4", "--with-lz4-includedir=\(prefix.path)", "--enable-zstd", "--enable-sqlsrv", "--with-pdo_sqlsrv"]
         if version.compare("8.4", options: .numeric) != .orderedAscending { arguments.append("--with-openssl-argon2") }
         else {
             arguments.removeAll { $0 == "--with-pgsql" || $0 == "--with-pdo-pgsql" }

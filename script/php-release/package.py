@@ -76,6 +76,9 @@ def archive(directory, output):
 def source_provenance(repo, version, architecture):
     core = repo / "Grove/Grove/Core"
     deps = (core / "ManagedPHPDependencyBuilder.swift").read_text()
+    parity = core / "ManagedPHPParityDependencies.swift"
+    if parity.exists():
+        deps += "\n" + parity.read_text()
     bundle = (core / "ManagedPHPExtensionBundle.swift").read_text()
     def inspector(name):
         path = core / (name + ".swift")
@@ -92,8 +95,13 @@ def source_provenance(repo, version, architecture):
         sources.append({"name": name, "kind": "static-library", "url": f"https://github.com/static-php/hosted/releases/download/2026.2.17/{name}-{arch}-darwin.txz", "sha256": arm if architecture == "arm64" else intel, "buildRecipe": "https://github.com/static-php/hosted/tree/2026.2.17"})
     for name, url, sha in re.findall(r'\.init\(name: "([^"]+)", url: "([^"]+)", digest: "([a-f0-9]{64})"', deps):
         sources.append({"name": name, "kind": "source-or-build-tool", "url": url, "sha256": sha})
-    for name, release, sha in re.findall(r'\.init\(name: "([^"]+)", version: "([^"]+)", sha256: "([a-f0-9]{64})"', bundle):
-        sources.append({"name": name, "kind": "source", "version": release, "url": f"https://pecl.php.net/get/{name}-{release}.tgz", "sha256": sha})
+    for name, release, sha in re.findall(r'(?:\.init|Source)\(name: "([^"]+)", version: "([^"]+)", sha256: "([a-f0-9]{64})"', bundle):
+        php_line = tuple(map(int, version.split(".")[:2]))
+        if name == "imap" and php_line < (8, 4):
+            continue  # Included in these PHP source archives.
+        git_sources = {"lz4": "kjdev/php-ext-lz4", "imagick": "Imagick/imagick"}
+        url = f"https://codeload.github.com/{git_sources[name]}/tar.gz/refs/tags/{release}" if name in git_sources else f"https://pecl.php.net/get/{name}-{release}.tgz"
+        sources.append({"name": name, "kind": "source", "version": release, "url": url, "sha256": sha})
     for name, release, sha in re.findall(r'\("(m4|autoconf)", "([^"]+)", "([a-f0-9]{64})"\)', bundle):
         sources.append({"name": name, "kind": "build-tool-source", "version": release, "url": f"https://ftp.gnu.org/gnu/{name}/{name}-{release}.tar.gz", "sha256": sha})
     sources += [{"name": "xdebug", "kind": "source", "version": pin(xdebug, "version"), "url": f'https://xdebug.org/files/xdebug-{pin(xdebug, "version")}.tgz', "sha256": pin(xdebug, "archiveSHA256")},
@@ -114,7 +122,7 @@ def source_provenance(repo, version, architecture):
     return {"schemaVersion": 1, "recipe": RECIPE, "phpVersion": version, "architecture": architecture,
             "sourceRevision": revision, "sourceRepository": repository,
             "sources": sorted(sources, key=lambda s: s["name"]),
-            "recipeFiles": {p: digest(repo / p) for p in ["Grove/Grove/Core/" + name for name in ["ManagedPHPExtensionBundle.swift", "ManagedPHPDependencyBuilder.swift", "PHPBuildSupport.swift", "ManagedPHPRelease.swift"]]},
+            "recipeFiles": {p: digest(repo / p) for p in (["Grove/Grove/Core/" + name for name in ["ManagedPHPExtensionBundle.swift", "ManagedPHPDependencyBuilder.swift", "ManagedPHPParityDependencies.swift", "PHPBuildSupport.swift", "ManagedPHPRelease.swift"]] + ["docs/php-extension-parity.md"]) if (repo / p).exists()},
             "notes": "Sources and checksums identify the exact inputs. The adjacent grove-build-recipe directory preserves the build recipe. No signing key is included."}
 
 

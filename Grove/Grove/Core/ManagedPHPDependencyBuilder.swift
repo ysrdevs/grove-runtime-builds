@@ -48,7 +48,7 @@ enum ManagedPHPDependencyBuilder {
         .init(name: "ngtcp2", url: "https://github.com/ngtcp2/ngtcp2/releases/download/v1.25.0/ngtcp2-1.25.0.tar.xz", digest: "2a34d2484ba17847a5d11965704e9dd0fac4c6d8efc75ffe1ec7de66d8c6b6fb", topDirectory: "ngtcp2-1.25.0", maximumBytes: 4_000_000),
         .init(name: "unistring", url: "https://ftp.gnu.org/gnu/libunistring/libunistring-1.4.2.tar.xz", digest: "5b46e74377ed7409c5b75e7a96f95377b095623b689d8522620927964a41499c", topDirectory: "libunistring-1.4.2", maximumBytes: 8_000_000),
         .init(name: "idn", url: "https://ftp.gnu.org/gnu/libidn/libidn2-2.3.8.tar.gz", digest: "f557911bf6171621e1f72ff35f5b1825bb35b52ed45325dcdee931e5d3c0787a", topDirectory: "libidn2-2.3.8", maximumBytes: 4_000_000)
-    ]
+    ] + ManagedPHPParityDependencies.sources
 
     static func prepare(directory: URL, root: URL, progress: @escaping @Sendable (String) async -> Void) async throws -> Prepared {
         guard directory.path.rangeOfCharacter(from: .whitespacesAndNewlines) == nil else { throw GroveError.message("The PHP build directory must not contain spaces.") }
@@ -80,6 +80,7 @@ enum ManagedPHPDependencyBuilder {
             let extracted = directory.appendingPathComponent("source-\(package.name)")
             try await PHPBuildSupport.extract(archive: archive, to: extracted)
             source[package.name] = extracted.appendingPathComponent(package.topDirectory)
+            try ManagedPHPParityDependencies.preserveSourceArchive(package, archive: archive, prefix: prefix)
         }
         let licenseFiles: [String: [String]] = ["jpeg": ["LICENSE.md"], "zip": ["LICENSE"], "avif": ["LICENSE"],
             "freetype": ["LICENSE.TXT", "docs/FTL.TXT", "docs/GPLv2.TXT"], "zstd": ["LICENSE", "COPYING"], "postgres": ["COPYRIGHT"],
@@ -192,6 +193,8 @@ enum ManagedPHPDependencyBuilder {
             .replacingOccurrences(of: "-lpgcommon ", with: "-lpgcommon_shlib ")
             .replacingOccurrences(of: "-lpgport ", with: "-lpgport_shlib ")
         try PHPConfiguration.writePrivate(Data(pqText.utf8), to: pqMetadata)
+        try await ManagedPHPParityDependencies.prepare(sources: source, prefix: prefix, directory: directory,
+                                                       environment: environment, progress: progress)
         // The PHP engine must not retain a dependency on this temporary build prefix.
         try removeDynamicLibraries(from: prefix)
         let sdk = environment["SDKROOT"]!
@@ -199,6 +202,7 @@ enum ManagedPHPDependencyBuilder {
             environment[name] = try await ProcessRunner.run(executable: pkgConfig.path, arguments: [flag, "libcurl"], environment: environment, timeout: 15).requireSuccess().stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         environment["LIBXML_CFLAGS"] = "-I\(sdk)/usr/include/libxml2"; environment["LIBXML_LIBS"] = "-lxml2"
+        environment.merge(ManagedPHPParityDependencies.systemEnvironment(sdk: sdk)) { _, value in value }
         environment["PGSQL_CFLAGS"] = "-I\(prefix.path)/include"
         environment["PGSQL_LIBS"] = try await ProcessRunner.run(executable: pkgConfig.path, arguments: ["--libs", "libpq"], environment: environment, timeout: 15).requireSuccess().stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         try Task.checkCancellation()

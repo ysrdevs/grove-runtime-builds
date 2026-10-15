@@ -14,7 +14,8 @@ enum PHPBuildSupport {
     static let hosts: Set<String> = ["www.php.net", "php.net", "downloads.php.net", "museum.php.net",
         "github.com", "api.github.com", "codeload.github.com", "release-assets.githubusercontent.com",
         "objects.githubusercontent.com", "raw.githubusercontent.com", "xdebug.org", "pecl.php.net", "ftp.gnu.org",
-        "libzip.org", "ftp.postgresql.org", "download.savannah.gnu.org", "download-mirror.savannah.gnu.org"]
+        "libzip.org", "ftp.postgresql.org", "download.savannah.gnu.org", "download-mirror.savannah.gnu.org",
+        "download.imagemagick.org", "www.openldap.org", "www.unixodbc.org"]
 
     static func allowed(_ url: URL) -> Bool {
         url.scheme == "https" && url.user == nil && url.password == nil

@@ -2,6 +2,47 @@ import XCTest
 @testable import GroveCore
 
 final class ManagedPHPDependencyTests: XCTestCase {
+    func testPrepareParityLibrariesFromExistingPrivatePrefix() async throws {
+        let process = ProcessInfo.processInfo.environment
+        guard let fixture = process["GROVE_PHP_PARITY_LIBRARY_FIXTURE"], let location = process["GROVE_PHP_PARITY_TEST_WORKSPACE"] else {
+            throw XCTSkip("Opt-in: build extra static PHP dependencies in an isolated copy of an existing private release prefix.")
+        }
+        let workspace = URL(fileURLWithPath: location)
+        guard workspace.path.hasPrefix("/private/tmp/GrovePHPParity"), !FileManager.default.fileExists(atPath: workspace.path) else {
+            throw GroveError.message("Choose a new GrovePHPParity workspace under /private/tmp.")
+        }
+        _ = try GrovePaths.ensureDirectory(workspace)
+        let prefix = workspace.appendingPathComponent("prefix")
+        try FileManager.default.copyItem(atPath: fixture, toPath: prefix.path)
+        if let entries = FileManager.default.enumerator(at: prefix, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey]) {
+            for file in entries.allObjects.compactMap({ $0 as? URL }) where ["pc", "la"].contains(file.pathExtension) || file.lastPathComponent == "pkg-config" {
+                let attributes = try file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                if attributes.isRegularFile == true, attributes.isSymbolicLink != true {
+                    let text = try String(contentsOf: file, encoding: .utf8)
+                    try text.replacingOccurrences(of: fixture, with: prefix.path).write(to: file, atomically: true, encoding: .utf8)
+                }
+            }
+        }
+        var environment = try await PHPBuildSupport.compilerEnvironment()
+        environment["PKG_CONFIG"] = prefix.appendingPathComponent("bin/pkg-config").path
+        environment["PKG_CONFIG_LIBDIR"] = prefix.appendingPathComponent("lib/pkgconfig").path
+        environment["CPPFLAGS"] = "-I\(prefix.path)/include"
+        environment["LDFLAGS"] = "-L\(prefix.path)/lib"
+        var sources: [String: URL] = [:]
+        for package in ManagedPHPParityDependencies.sources {
+            let archive = try await PHPBuildSupport.download(url: URL(string: package.url)!, sha256: package.digest, maximumBytes: package.maximumBytes, root: workspace)
+            let destination = workspace.appendingPathComponent("source-" + package.name)
+            try await PHPBuildSupport.extract(archive: archive, to: destination)
+            sources[package.name] = destination.appendingPathComponent(package.topDirectory)
+            try ManagedPHPParityDependencies.preserveSourceArchive(package, archive: archive, prefix: prefix)
+        }
+        try await ManagedPHPParityDependencies.prepare(sources: sources, prefix: prefix, directory: workspace, environment: environment, progress: { print($0) })
+        for name in ["libintl.a", "libldap.a", "liblber.a", "libc-client.a", "libMagickWand-7.Q16HDRI.a", "libMagickCore-7.Q16HDRI.a", "libodbc.a", "libodbcinst.a"] {
+            XCTAssertTrue(FileManager.default.fileExists(atPath: prefix.appendingPathComponent("lib/" + name).path), name)
+        }
+        print("Parity libraries prepared at \(prefix.path)")
+    }
+
     func testPinnedPackagesCoverBothNativeArchitecturesAndExplicitSources() throws {
         XCTAssertEqual(Set(ManagedPHPDependencyBuilder.hostedPackages.map { $0.0 }).count, ManagedPHPDependencyBuilder.hostedPackages.count)
         for (_, arm, intel) in ManagedPHPDependencyBuilder.hostedPackages {

@@ -14,7 +14,7 @@ public struct RuntimeInstallation: Sendable {
         self.family = family; self.version = version; self.executablePath = executablePath; self.source = source
     }
 }
-struct RuntimeRelease { let family: RuntimeFamily; let version: String; let label: String; let installIdentifier: String }
+struct RuntimeRelease { let family: RuntimeFamily; let version: String; let label: String; let installIdentifier: String; var publishedPackageID: String? = nil }
 enum GrovePaths {
     static var processEnvironment: [String: String] { ProcessInfo.processInfo.environment }
     static func ensureDirectory(_ directory: URL) throws -> URL {

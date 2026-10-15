@@ -29,11 +29,14 @@ private final class ProcessOutput: @unchecked Sendable {
     private let lock = NSLock()
     private var data = Data()
     private let limit: Int
-    init(limit: Int = 2_000_000) { self.limit = limit }
+    private let onOutput: (@Sendable (Data) -> Void)?
+    init(limit: Int = 2_000_000, onOutput: (@Sendable (Data) -> Void)? = nil) { self.limit = limit; self.onOutput = onOutput }
     func append(_ chunk: Data) {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         data.append(chunk)
         if data.count > limit { data.removeFirst(data.count - limit) }
+        lock.unlock()
+        onOutput?(chunk)
     }
     var text: String { lock.lock(); defer { lock.unlock() }; return String(decoding: data, as: UTF8.self) }
 }
@@ -104,7 +107,7 @@ enum OwnedCommandChildren {
 public enum ProcessRunner {
     /// Executes an argument vector directly. Output is bounded and cancellation stops the owned process.
     public static func run(executable: String, arguments: [String], directory: URL? = nil,
-                           environment: [String: String] = [:], removingEnvironment: Set<String> = [], timeout: TimeInterval = 120, outputLimit: Int = 2_000_000, standardInput: Data? = nil) async throws -> ProcessResult {
+                           environment: [String: String] = [:], removingEnvironment: Set<String> = [], timeout: TimeInterval = 120, outputLimit: Int = 2_000_000, standardInput: Data? = nil, onOutput: (@Sendable (Data) -> Void)? = nil) async throws -> ProcessResult {
         guard (standardInput?.count ?? 0) <= 8_192 else { throw GroveError.message("Command input exceeds the 8 KB limit.") }
         let cancellation = ProcessCancellation()
         return try await withTaskCancellationHandler(operation: {
@@ -133,7 +136,7 @@ public enum ProcessRunner {
                     }
                     let stdout = Pipe(), stderr = Pipe()
                     let limit = min(32_000_000, max(1_000, outputLimit))
-                    let out = ProcessOutput(limit: limit), err = ProcessOutput(limit: limit)
+                    let out = ProcessOutput(limit: limit, onOutput: onOutput), err = ProcessOutput(limit: limit, onOutput: onOutput)
                     process.standardOutput = stdout; process.standardError = stderr
                     let outReader = ProcessPipeReader(handle: stdout.fileHandleForReading, output: out)
                     let errReader = ProcessPipeReader(handle: stderr.fileHandleForReading, output: err)
